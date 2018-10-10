@@ -34,6 +34,7 @@ bblid=80557;scanid=3476;
 		echo "Detected TE1 = $te1, TE2 = $te2; dTE = $dTE"
 
 		# T2*
+		mask=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mask*.nii.gz)
 		mag1=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mag1.nii.gz)
 		mag2=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mag2.nii.gz)
 		fslmaths $mag1 -s 3 ${subjOutputDir}/mag1sm.nii.gz
@@ -41,6 +42,7 @@ bblid=80557;scanid=3476;
 		mag1sm=${subjOutputDir}/mag1sm.nii.gz
 		mag2sm=${subjOutputDir}/mag2sm.nii.gz
 		3dcalc -a $mag1sm -b $mag2sm -expr "-$dTE/(log(b/a))" -prefix ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -overwrite
+		3dcalc -a ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -b $mask -expr '(a*b)' -prefix ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -overwrite
 		rm $mag1sm $mag2sm
 	fi
 #done
