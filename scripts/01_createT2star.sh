@@ -5,8 +5,8 @@ t1DataDir=/data/joy/BBL/studies/pnc/processedData/structural/antsCorticalThickne
 pncB0DataDir=/data/joy/BBL/studies/pnc/processedData/b0mapwT2star/
 
 t2only=1;
-#sed 1d $demographicsFile |head | while IFS=, read bblid scanid other; do
-bblid=80557;scanid=3476;
+sed 1d $demographicsFile |head | while IFS=, read bblid scanid other; do
+#bblid=80557;scanid=3476;
     subjRawData="${baseRawDataPath}${bblid}/*x${scanid}"
     subjB0Maps=`find ${subjRawData} -name "B0MAP*" -type d`
     subjB0Maps1=`echo ${subjB0Maps} | cut -f 1 -d ' '`
@@ -45,4 +45,4 @@ bblid=80557;scanid=3476;
 		3dcalc -a ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -b $mask -expr '(a*b)' -prefix ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -overwrite
 		rm $mag1sm $mag2sm
 	fi
-#done
+done

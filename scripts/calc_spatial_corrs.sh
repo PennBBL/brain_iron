@@ -7,7 +7,7 @@ outfile=/data/jux/BBL/projects/brain_iron/results/bbr_mi_ccs.csv
 echo -n >$outfile
 echo "bblid,scanid,cc">>$outfile
 
-sed 1d $demographicsFile |head -25 | while IFS=, read bblid scanid other; do
+sed 1d $demographicsFile |head -55 | while IFS=, read bblid scanid other; do
 
 thisDataDir=/data/jux/BBL/projects/brain_iron/t2starData/${bblid}/${scanid}
 

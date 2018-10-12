@@ -10,8 +10,8 @@ outdir=/data/jux/BBL/projects/brain_iron/t2starData/
 #template_brain=/data/joy/BBL/studies/pnc/n1601_dataFreeze/neuroimaging/pncTemplate/pnc_template_brain.nii.gz 
 template_brain=/data/jux/BBL/projects/brain_iron/input_data/pnc_template_brain_4mm.nii.gz
 
-#bblid=122895;scanid=8449;
-sed 1d $demographicsFile |head -25 | while IFS=, read bblid scanid other; do
+#bblid=80265;scanid=3145;
+sed 1d $demographicsFile |head -55 | while IFS=, read bblid scanid other; do
 
 (thisOutDir=${outdir}/${bblid}/${scanid}/
 thisAff=$(ls ${t1DataDir}/${bblid}/*${scanid}/SubjectToTemplate0GenericAffine.mat)
@@ -40,3 +40,4 @@ antsApplyTransforms -d 3 -i $thisT2s -r $template_brain -o $thisOutDir/${bblid}_
 while [ $(jobs -p|wc -l) -ge $maxjobs ]; do sleep 1; done
 
 done
+wait
