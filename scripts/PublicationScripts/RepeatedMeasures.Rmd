@@ -1,0 +1,220 @@
+---
+title: "RepeatedMeasuresAnalyses"
+author: "Bart"
+date: "4/3/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+## Load Libraries
+require(ggplot2)
+require(gridExtra)
+require(tidyverse)
+require(itsadug)
+library(kableExtra)
+library(scales)
+library(MplusAutomation)
+library(sjPlot)
+require(mgcViz)
+library(lme4)
+library(lmerTest)
+setwd("/data/jux/BBL/projects/brain_iron/scripts/analysis/")
+knitr::opts_knit$set(root.dir = "/data/jux/BBL/projects/brain_iron/scripts/analysis/")
+source("compileData.R")
+theme_set(theme_classic())
+```
+
+```{r load, include=FALSE, warning=FALSE}
+# Load the datafile
+dataFile <- "/data/jux/BBL/projects/brain_iron/scripts/PublicationScripts/brain_iron_data_TEMPLATE.Rda"
+if (file.exists(dataFile)) {
+  dataTable <- readRDS(file=dataFile)
+}  else {
+  source('compileData.R')
+  compileData()
+  dataTable <- readRDS(file=dataFile)
+}
+
+## Filter
+### Remove
+### 1. Projects with incompatible data (reward)
+### 2. Sequences with odd parameters
+### 3. Scans that don't pass QA
+### 4. A couple scans and timepoints that hae very few observations (for better model fitting)
+dataTable <- dataTable %>%
+  filter(bblid != 110689)%>%
+  filter(!(ProjectName %in% c("DAY2_808799",
+                              "FNDM1_810211",
+                              "FNDM2_810211",
+                              "NEFF_V2",
+                              "NEFF_PILOT",
+                              "GRMPY_822831",
+                              "GRMPY_V2",
+                              "GRMPY_V3")
+           )
+         ) %>% #Not using data from these projects.
+  filter(sequence != 'B0map_v4_matchedFOV') %>% # Different voxel size
+  filter(sequence != 'B0map_onesizefitsall_v3_T2S') %>% # small number of scans with odd params
+  filter(GOOD %in% c("1","2")) %>%
+  filter(!timepoint %in% c("4")) %>% # Only 5 visits at timepoint 4, may cause issues for modeling
+  filter(sequence != 'b0map_v4') %>% #Very few scans, potentially issue for model fitting
+  filter(age<35) %>%# not necessary, all are already under 35
+  group_by(bblid) %>% 
+  mutate(visitnum = min_rank(ScanAgeMonths))
+
+df <- dataTable %>%
+  group_by(bblid) %>% 
+  mutate(visitnum = min_rank(ScanAgeMonths))
+
+misstab<-df %>% filter(is.na(Left_Accumbens_Area)) %>% select(bblid)
+mt <- df %>% filter(bblid %in% misstab$bblid) %>% group_by(bblid) %>% summarize(max(visitnum))
+MISSINGSCANS<-df %>% filter(is.na(Left_Accumbens_Area)) %>% select(bblid,scanid,project,visitnum)
+print(MISSINGSCANS)
+
+rmBBLIDs <- df %>% 
+  group_by(bblid) %>% 
+  summarize(n=n()) %>%
+  filter(n>1) %>%
+  select(bblid)
+
+rmTable <- df %>% 
+  filter(bblid %in% rmBBLIDs$bblid) %>%
+  select(bblid,scanid,datasetid,visit,visitnum,scan2cnbmonths,project,age,Left_Accumbens_Area,NAR_Overall_Accuracy,GOOD)%>%
+  arrange(bblid,scanid)
+
+# make filtered mplus table
+#out for now: !is.na(NAR_F1_Exec_Comp_Cog_Accuracy)|
+mpdf <- dataTable %>%
+  filter(!is.na(Putamen) & !is.na(NAR_Overall_Efficiency))%>%
+  filter(age<35) %>%
+  filter(GOOD == "1" | GOOD == "2") %>%
+  filter(scan2cnbmonths<6) %>%
+  group_by(bblid) %>% 
+  mutate(visitnum = min_rank(ScanAgeMonths))
+
+rmBBLIDs <- mpdf %>% 
+  group_by(bblid) %>% 
+  summarize(n=n()) %>%
+  filter(n>1) %>%
+  select(bblid)
+```
+
+```{r runmodel}
+cog_vars <- c("NAR_Overall_Accuracy","NAR_Overall_Efficiency","NAR_F1_Social_Cognition_Efficiency","mpraxis_mp2rtcr")
+
+for (brain_var in c("Accumbens_Area","Putamen","Caudate")) {
+  cat(brain_var)
+  thisTab <- mpdf
+  
+for (beh_var in cog_vars) {
+  cat(beh_var)
+
+  mplusTable <- thisTab %>% 
+    filter(bblid %in% rmBBLIDs$bblid) %>%
+    select_("bblid","visitnum","age",beh_var,brain_var,"sex","sequence","timepoint")%>%
+    arrange(bblid)
+
+  widetab <- mplusTable %>%  pivot_wider(names_from = visitnum, id_cols = c(bblid,sex), values_from = c(age,brain_var,beh_var,sequence, timepoint))# %>%
+  #  rowwise() %>%
+  #  mutate(Psychosis = mean(c(Psychosis_1,Psychosis_2,Psychosis_2),na.rm=T),Accumbens_Area = mean(c(Accumbens_Area_1,Accumbens_Area_2,Accumbens_Area_3),na.rm=T))
+    
+  tab1 <- widetab %>%
+    select(bblid,sex,contains("_1"),contains("_2"))
+  names(tab1) <- gsub(colnames(tab1),pattern = "_1",replacement = "_Past")
+  names(tab1) <- gsub(colnames(tab1),pattern = "_2",replacement = "_Cur")
+  
+  tab2 <- widetab %>%
+    filter(!is.na(age_3)) %>%
+    select(bblid,sex,contains("_2"),contains("_3"))
+  names(tab2) <- gsub(colnames(tab2),pattern = "_2",replacement = "_Past")
+  names(tab2) <- gsub(colnames(tab2),pattern = "_3",replacement = "_Cur")
+  
+  mptab <- rbind(tab1,tab2) %>%
+    mutate(Elapsed = age_Cur - age_Past)
+  
+  #prepareMplusData(mptab,"./test_mplus_input.dat",inpfile = F,writeData = "always",overwrite = T)
+  #runModels(showOutput = T)
+  #write.csv(mptab,"~/mplus_vars.csv",row.names = F)
+  
+  deltaTable <- mptab %>%
+    ungroup() %>%
+    mutate(Beh_delta = get(paste0(beh_var,"_Cur")) - get(paste0(beh_var,"_Past")))%>%
+    filter(Beh_delta != 111110) %>%
+    mutate(Beh_res=residuals(lmer(as.formula(sprintf('%s_Cur ~ %s_Past+ (1|bblid)',beh_var,beh_var)), data = .),type = "pearson"),
+           Beh_delta_res = residuals(lmer(as.formula(sprintf('Beh_delta ~ %s_Past + (1|bblid)',beh_var)),data = .),type = "pearson"),
+           Brain_delta = get(paste0(brain_var,"_Cur")) - get(paste0(brain_var,"_Past")),
+           Brain_res=residuals(lmer(as.formula(sprintf('%s_Cur ~ %s_Past+ (1|bblid)',brain_var,brain_var)), data = .),type = "pearson"),
+           Brain_delta_res = residuals(lmer(as.formula(sprintf('Brain_delta ~ %s_Past + (1|bblid)',brain_var)),data = .),type = "pearson")
+           )%>%
+    filter(Brain_res<50 & Brain_res>-50) %>%
+    filter(Beh_res<5000000)
+  cat('\n\n',brain_var,beh_var,'\n')
+  # print(summary(lmer(Beh_res ~ Brain_res*Elapsed*age_Past + sequence_Past + sequence_Cur + sex+(1|bblid),data = deltaTable)))
+  # print(plot_model(lmer(Beh_res ~ Brain_res*Elapsed*age_Past + sex+(1|bblid),data = deltaTable),type = 'int',show.p = T))
+  #
+  print(summary(lmer(Beh_res ~ Brain_res*Elapsed + age_Past + sex + sequence_Past + sequence_Cur+(1|bblid),data = deltaTable)))
+  # print(plot_model(lm(Beh_res ~ Brain_res*Elapsed + age_Past + sex + sequence_Past + sequence_Cur,data = deltaTable),type = 'int',show.values = T,show.p = T,
+                   # axis.title = c(sprintf('%s (res change)',brain_var),sprintf('%s (res change)',beh_var))))
+
+  print(summary(lmer(Beh_res ~ Brain_res*age_Past + sex + sequence_Past + timepoint_Cur + sequence_Cur+(1|bblid),data = deltaTable)))
+  # print(plot_model(lm(Beh_res ~ Brain_res*age_Past + sex + sequence_Past + sequence_Cur,data = deltaTable),type = 'int',show.values = T,show.p = T,
+                   # axis.title = c(sprintf('%s (res change)',brain_var),sprintf('%s (res change)',beh_var))))
+
+  l <- lmer(Beh_res ~ Brain_res + Elapsed + age_Past + sex +(1|bblid),data = deltaTable)
+  print(summary(l))
+  # c< -coef(l)
+  # a<-c["(Intercept)"]
+  # b <- c["Brain_res"]
+  # ggplot(data = deltaTable, aes(x = Brain_res, y = Beh_res)) + geom_abline(intercept = a, slope  =b) + geom_point()
+  print(plot_model(l,type = "pred",terms = "Brain_res",show.data = T,axis.title = c(sprintf('%s (res change)',brain_var),sprintf('%s (res change)',beh_var))))
+
+  l <- lmer(Beh_res ~ Brain_res+(1|bblid),data = deltaTable)
+  print(summary(l))
+  print(plot_model(l,type = "pred",terms = "Brain_res",show.data = T,axis.title = c(sprintf('%s (res change)',brain_var),sprintf('%s (res change)',beh_var))))
+
+  l <- lmer(Beh_delta ~ Brain_delta+(1|bblid),data = deltaTable)
+  print(summary(l))
+  print(plot_model(l,type = "pred",terms = "Brain_delta",show.data = T,axis.title = c(sprintf('%s (delta)',brain_var),sprintf('%s (delta)',beh_var))))
+}
+   
+}
+
+# #compare to cog only
+# rmBBLIDs <- tytables %>% 
+#   group_by(bblid) %>% 
+#   summarize(n=n()) %>%
+#   filter(n>1) %>%
+#   select(bblid)
+# 
+# rmTable <- tytables %>% 
+#   filter(bblid %in% rmBBLIDs$bblid) %>%
+#   select(bblid,timepoint,cnbAgeMonths)%>%
+#   arrange(bblid)
+# 
+# deltaTable <- rmTable %>%
+#   group_by(bblid) %>% 
+#   summarize(vdiff2 = cnbAgeMonths[which(timepoint==2)]-cnbAgeMonths[which(timepoint==1)],
+#             vdiff3 = ifelse(max(timepoint)==3,cnbAgeMonths[which(timepoint==3)]-cnbAgeMonths[which(timepoint==2)],NA))
+
+```
+
+
+```{r summarize, eval=FALSE,include=FALSE}
+ggplot(data = rmTable,aes(x = visitnum)) + geom_histogram(bins=4,color = "white")
+
+maxviz <- rmTable %>%
+  group_by(bblid) %>%
+  summarize(max=max(visitnum)) %>%
+  filter(max>1)
+
+ggplot(data = maxviz,aes(x = max)) + geom_histogram(bins = 3,color = "white")
+
+deltaTable <- rmTable %>%
+  group_by(bblid) %>% 
+  summarize(vdiff2 = age[which(visitnum==2)]-age[which(visitnum==1)],
+            vdiff3 = ifelse(max(visitnum)==3,age[which(visitnum==3)]-age[which(visitnum==2)],NA))
+ggplot(data = deltaTable,aes(x=vdiff2)) + geom_histogram() + labs(title = "Duration time 1 to time 2 (years)") + xlab("Years")
+ggplot(data = deltaTable,aes(x=vdiff3)) + geom_histogram() + labs(title = "Duration time 2 to time 3 (years)") + xlab("Years")
+
+
+```

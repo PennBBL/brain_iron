@@ -1,42 +1,173 @@
-demographicsFile=/data/joy/BBL/studies/pnc/n2416_dataFreeze/clinical/n2416_demographics_20170310.csv
+#!/bin/bash
+#set -xe
+maxjobs=30
+scan_list="/data/jux/BBL/projects/brain_iron/scripts/xnat/xnat_table.csv"
+#scan_list="/data/jux/BBL/projects/brain_iron/scripts/xnat/missing_data_xnat_table.csv"
 baseOutputPath="/data/jux/BBL/projects/brain_iron/t2starData/"
-baseRawDataPath="/data/joy/BBL/studies/pnc/rawData/"
-t1DataDir=/data/joy/BBL/studies/pnc/processedData/structural/antsCorticalThickness/
-pncB0DataDir=/data/joy/BBL/studies/pnc/processedData/b0mapwT2star/
 
-t2only=1;
-sed 1d $demographicsFile |head | while IFS=, read bblid scanid other; do
-#bblid=80557;scanid=3476;
-    subjRawData="${baseRawDataPath}${bblid}/*x${scanid}"
-    subjB0Maps=`find ${subjRawData} -name "B0MAP*" -type d`
-    subjB0Maps1=`echo ${subjB0Maps} | cut -f 1 -d ' '`
-    subjB0Maps2=`echo ${subjB0Maps} | cut -f 2 -d ' '`
-    subjOutputDir="${baseOutputPath}/${bblid}/${scanid}/"
+PNCrawDataDir="/data/joy/BBL/studies/pnc/rawData/"
+PNCt1DataDir="/data/joy/BBL/studies/pnc/processedData/structural/antsCorticalThickness/"
+PNCjlfDataDir="/data/joy/BBL/studies/pnc/processedData/structural/jlf/"
+GRMPYt1DataDir="/data/joy/BBL/studies/grmpy/processedData/structural/struct_pipeline_20170716/" #"/data/joy/BBL/studies/grmpy/processedData/structural/struct_pncxcp_20181225/"
+REWt1DataDir="/data/joy/BBL/studies/reward/processedData/struc_pnc_template/"
+#CONTEt1DataDir="/data/joy/BBL/studies/conte/processedData/structural/conte_design3_n118_structural_201706051547/"
+CONTEt1DataDir="/data/joy/BBL/studies/conte/processedData/structural_20190402/"
+
+d=$(date +%F)
+logfile=logfile_01_createT2star_${d}.log
+echo $d>$logfile
+
+echofile=echotimes.csv
+echo "bblid,scanid,project,sequence,te1,te2,dTE">$echofile
+
+sed 1d $scan_list |while IFS=, read zbblid zscanid sessionid f4 project f6 scannum f8 f9 desc other; do
+	(
+	bblid=$(echo ${zbblid}|sed 's/^0*//')
+	scanid=$(echo ${zscanid}|sed 's/^0*//')
+	subjOutputDir="${baseOutputPath}/${bblid}/${scanid}/"
+	#dicoms=$(ls -d ${subjOutputDir}/${scannum}_*/Dicoms)||{ echo "Missing ${subjOutputDir}/${scannum}_*/Dicoms for $bblid $scanid $porject" | tee -a $logfile; continue ; }
+	dicoms=$(ls -d ${subjOutputDir}/${scannum}_${desc}/Dicoms 2>/dev/null)||{ echo "Missing ${dicoms} for $bblid $scanid $project" | tee -a $logfile; continue ; }
+	[[ ! -r ${subjOutputDir}/Dicoms ]] && ln -s ${dicoms} ${subjOutputDir}
+	dicomdir=${subjOutputDir}/Dicoms/
+	niftidir=${subjOutputDir}/nifti/
+
 	
-	mkdir -p ${subjOutputDir}
-	rawT1=$(ls $subjRawData/*mprage*/*t1.nii.gz)||{ echo "missing Raw T1 data for sub ${bblid}, scan ${sid}!!!!"; continue ; }
-	betT1=$(ls $t1DataDir/$bblid/*${sid}/ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for sub ${bblid}, scan ${sid}!!!!"; continue ; }
+	# --- Dicom to nifti if we need to start from scratch ---#
+	if [ ! -r ${niftidir}/mag2.nii.gz ]; then
+		## We need to convert the dicoms to nifti
+		#First dicom to nifti
+		maglist1="";maglist2="";
+		for d in $(ls ${dicomdir}/*dcm*);do 
+			line=$(dicom_hdr $d |grep -i "echo number");
+			echoNum=${line##*Number//}; 
+			if [ $echoNum -eq 1 ]; then 
+				maglist1="$maglist1 $d"; 
+			elif [ $echoNum -eq 2 ]; then 
+				maglist2="$maglist2 $d"; 
+			else echo "\nbad echo count for $bblid $scanid $d">>$logfile;
+			fi
+		done
+		mkdir -p ${niftidir}/mag1
+		mkdir -p ${niftidir}/mag2
+		dcm2nii -d N -e N -v N -o ${niftidir}/mag1 $maglist1 2>>$logfile
+		dcm2nii -d N -e N -v N -o ${niftidir}/mag2 $maglist2 2>>$logfile
+		# sym links
+		ln -sf ${niftidir}/mag1/*nii.gz ${niftidir}/mag1.nii.gz
+		ln -sf ${niftidir}/mag2/*nii.gz ${niftidir}/mag2.nii.gz
+	fi
+	mag1=${niftidir}/mag1.nii.gz
+	mag2=${niftidir}/mag2.nii.gz
+		
+	# --- Process Structurals --- #
+	case $project in 
+	EONS_* |EONS3*)
+		rawT1=$(ls $PNCrawDataDir/$bblid/*${scanid}/mprage/${bblid}_*t1.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls $PNCt1DataDir/$bblid/*${scanid}/ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls $PNCt1DataDir/$bblid/*${scanid}/BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing brain mask for sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		jlf=$(ls ${PNCjlfDataDir}/${bblid}/*${scanid}/${bblid}*jlfLabels.nii.gz 2>/dev/null)||{ echo "missing JLF labels for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		;;
+	GRMPY* |EONSX* )
+		rawT1=$(ls ${GRMPYt1DataDir}/${bblid}/*${scanid}/antsCT/${bblid}*RawInputImage.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${GRMPYt1DataDir}/${bblid}/*${scanid}/antsCT/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${GRMPYt1DataDir}/${bblid}/*${scanid}/antsCT/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		jlf=$(ls ${GRMPYt1DataDir}/${bblid}/*${scanid}/jlf/${bblid}*Labels.nii.gz 2>/dev/null)||{ echo "missing JLF labels for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		;;
+	NODRA*)
+		thisRawDir="$( ls -d /data/joy/BBL/studies/reward/rawData/${bblid}/*x${scanid}/t1 2>/dev/null)"||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		rawT1=$(ls ${thisRawDir}/nifti/${bblid}_*x${scanid}_t1.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${REWt1DataDir}/${bblid}/${scanid}/struc/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${REWt1DataDir}/${bblid}/${scanid}/struc/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		#jlf=$(ls ${REWt1DataDir}/${bblid}/*${scanid}/jlf/${bblid}*Labels.nii.gz 2>/dev/null)||{ echo "missing JLF labels for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		;;
+	NEFF* | FNDM* |DAY2*)
+		thisRawDir="$( ls -d /data/joy/BBL/studies/reward/rawData/${bblid}/*x${scanid}/t1 2>/dev/null)"||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		rawT1=$(ls ${thisRawDir}/nifti/${bblid}_*x${scanid}_t1.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${REWt1DataDir}/${bblid}/*${scanid}/antsCT/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${REWt1DataDir}/${bblid}/*x${scanid}/antsCT/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		jlf=$(ls ${REWt1DataDir}/${bblid}/*${scanid}/jlf/${bblid}*Labels.nii.gz 2>/dev/null)||{ echo "missing JLF labels for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		;;
+	#CONTE* )
+	#	rawT1=$(ls ${CONTEt1DataDir}/${bblid}/*x${scanid}/antsCT/${bblid}*RawInputImage.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+	#	betT1=$(ls ${CONTEt1DataDir}/${bblid}/*x${scanid}/antsCT/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+	#	t1mask=$(ls ${CONTEt1DataDir}/${bblid}/*x${scanid}/antsCT/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+	#	jlf=$(ls ${CONTEt1DataDir}/${bblid}/*${scanid}/jlf/${bblid}*Labels.nii.gz 2>/dev/null)||{ echo "missing JLF labels for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+	#	;;
+	CONTE* )
+		t1DataDir="${CONTEt1DataDir}/${bblid}/${scanid}/struc/"
+		rawT1=$(ls /data/joy/BBL/studies/conte/rawData/${bblid}/*${scanid}/*MPRAGE*/nifti/*MPRAGE*.nii.gz  2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${t1DataDir}/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${t1DataDir}/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		#jlf=echo "no JLF labels for ONM" 
+		;;
+	ONM* )
+		t1DataDir="/data/joy/BBL/studies/onm/processedData/structural/${bblid}/${scanid}/struc/"
+		rawT1=$(ls /data/joy/BBL/studies/onm/rawData/${bblid}/${scanid}/MPRAGE_TI1110_ipat2_moco3/nifti/MPRAGETI1110ipat2moco3.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${t1DataDir}/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${t1DataDir}/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		#jlf=echo "no JLF labels for ONM" 
+		;;
+	AGGY* )
+		t1DataDir="/data/joy/BBL/studies/aggy/processedData/structural_20190315/${bblid}/${scanid}/struc/"
+		rawT1=$(ls /data/joy/BBL/studies/aggy/rawData/${bblid}/*${scanid}/mprage/nifti/*MPRAGE*.nii.gz 2>/dev/null)||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${t1DataDir}/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${t1DataDir}/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		#jlf=echo "no JLF labels for ONM" 
+		;;
+		
+	SYRP* )
+		t1DataDir="/data/joy/BBL/studies/SYRP/processedData/structural_20190402/${bblid}/${scanid}/struc/"
+		rawT1="$(ls -d /data/joy/BBL/studies/SYRP/rawData/${bblid}/*x${scanid}/*MPRAGE*/nifti/*MPRAGE*.nii.gz 2>/dev/null)" ||{ echo "missing Raw T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		betT1=$(ls ${t1DataDir}/${bblid}*ExtractedBrain0N4.nii.gz 2>/dev/null)||{ echo "missing bet T1 data for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		t1mask=$(ls ${t1DataDir}/${bblid}*BrainExtractionMask.nii.gz 2>/dev/null)||{ echo "missing mask for PROJECT ${project} sub ${bblid}, scan ${scanid}!!!!" | tee -a $logfile; continue ; }
+		#jlf=echo "no JLF labels for ONM" 
+		;;
+
+	OLIFE* )
+		echo "No structural data yet for ${project}. Skipping for now..."| tee -a $logfile
+		continue
+		;;
+	*)
+		echo "${project} Project not recognized"
+		continue
+	esac
 	
-	if [ $t2only -ne 1 ]; then
-		#Run the script for b0map processing and T2 generation
-		/data/jux/BBL/projects/pncReproc2015/pncReproc2015Scripts/dico/dico_b0calc_v4_afgr.sh -2 ${subjOutputDir}${bblid}_${scanid} ${subjB0Maps1}/ ${subjB0Maps2}/ ${rawT1} ${betT1}
-		for i in `ls ${subjOutputDir}*nii` ; do 
-			/share/apps/fsl/5.0.8/bin/fslchfiletype NIFTI_GZ ${i} ; 
-		done  
-	else
-		# --- Just calculate T2* ---
+	if [ ! -r ${niftidir}/mask_in_mag1.nii.gz ]; then
+		mkdir -p ${subjOutputDir}/structural/
+		ln -sf $rawT1 ${subjOutputDir}/structural/${bblid}_${scanid}_T1.nii.gz
+		ln -sf $betT1 ${subjOutputDir}/structural/${bblid}_${scanid}_T1_BET.nii.gz
+		ln -sf $t1mask ${subjOutputDir}/structural/${bblid}_${scanid}_brain_mask.nii.gz
+		#ln -sf $jlf ${subjOutputDir}/structural/${bblid}_${scanid}_jlf.nii.gz
+	
+		flirt -in $rawT1 -ref $mag1 -o ${niftidir}/T1_in_mag1.nii.gz  -omat ${niftidir}/t1_to_mag1.mat -dof 6
+		flirt -in $betT1 -ref $mag1 -o ${niftidir}/betT1_in_mag1.nii.gz -init ${niftidir}/t1_to_mag1.mat -applyxfm -interp nearestneighbour
+		flirt -in $t1mask -ref $mag1 -o ${niftidir}/mask_in_mag1.nii.gz -init ${niftidir}/t1_to_mag1.mat -applyxfm -interp nearestneighbour	
+		#flirt -in $jlf -ref $mag1 -o ${niftidir}/jlf_in_mag1.nii.gz -init ${niftidir}/t1_to_mag1.mat -applyxfm -interp nearestneighbour	
+	fi
+	
+
+	# --- Calculate T2* ---
+	# [ ! -r ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz ]; then
 		# get the echo times
-		te1_line=$(dicom_hdr $(find $subjB0Maps1 | sort -n |sed -n 2p)|grep -i "echo time")
-		te1=${te1_line##*Time//}
-		te2_line=$(dicom_hdr $(find $subjB0Maps1 | sort -n |tail -1)|grep -i "echo time")
-		te2=${te2_line##*Time//}
+		for d in $(ls ${dicomdir}/*dcm*);do 
+			echoline=$(dicom_hdr $d |grep -i "echo number");
+			echoNum=${echoline##*Number//}; 
+			timeline=$(dicom_hdr $d |grep -i "echo time");
+			echoTime=${timeline##*Time//};
+			if [ $echoNum -eq 1 ]; then 
+				te1=$echoTime
+			elif [ $echoNum -eq 2 ]; then 
+				te2=$echoTime 
+			else echo "\nbad echo numbers for $bblid $scanid $d">>$logfile;
+			fi
+		done
 		dTE=$(echo $te2 - $te1 |bc) #bc does floating point math
-		echo "Detected TE1 = $te1, TE2 = $te2; dTE = $dTE"
+		#echo "Detected TE1 = $te1, TE2 = $te2; dTE = $dTE"
+		echo "${bblid},${scanid},${project},${desc},${te1},${te2},$dTE">>$echofile
+	
+	# T2*
+	if [ ! -r ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz ]; then
 
-		# T2*
-		mask=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mask*.nii.gz)
-		mag1=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mag1.nii.gz)
-		mag2=$(find ${pncB0DataDir}/$bblid/*${scanid}/${bblid}*mag2.nii.gz)
+		mask=${niftidir}/mask_in_mag1.nii.gz 2>>$logfile
 		fslmaths $mag1 -s 3 ${subjOutputDir}/mag1sm.nii.gz
 		fslmaths $mag2 -s 3 ${subjOutputDir}/mag2sm.nii.gz
 		mag1sm=${subjOutputDir}/mag1sm.nii.gz
@@ -45,4 +176,12 @@ sed 1d $demographicsFile |head | while IFS=, read bblid scanid other; do
 		3dcalc -a ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -b $mask -expr '(a*b)' -prefix ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz -overwrite
 		rm $mag1sm $mag2sm
 	fi
+	if [ ! -r ${subjOutputDir}/${bblid}_${scanid}_r2star.nii.gz ]; then
+		3dcalc -a ${subjOutputDir}/${bblid}_${scanid}_t2star.nii.gz '(1000/a)' -prefix ${subjOutputDir}/${bblid}_${scanid}_r2star.nii.gz -overwrite # convert T2* (msec) to R2*(sec)
+	fi
+	) &
+	while [ $(jobs -p|wc -l) -ge $maxjobs ]; do sleep 1s; done
+
 done
+echo "Script completed at $(date)"|tee -a $logfile
+

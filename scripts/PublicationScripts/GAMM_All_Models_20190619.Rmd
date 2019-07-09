@@ -1,0 +1,871 @@
+---
+title: "Age*Cognition and Clincal Symptom GAMM Interaction models"
+author: "Bart"
+date: "2/28/2019"
+output:
+  html_document: default
+  toc: true
+  # pdf_document: default
+---
+
+# Modeling the effect of continuous interactions of covariates with `age` on `R2s`
+This code implements best practices for continuous x continuous GAMM models as decided upon in Psychosis_GAMM_v3.rmd
+Paraphrasing the technique:  
+> "Use `gamm` with smoothed main effects and bivariate interactions modeled with tensor product interaction smooths, `ti`. Models use fixed *df* for smooth terms and parametric bootstrapping is done to test all nested models."  
+---
+
+```{r setup, include=FALSE}
+## Load Libraries
+require(ggplot2)
+require(gridExtra)
+require(tidyverse)
+require(mgcv)
+require(gamm4)
+require(mgcViz)
+require(sjPlot)
+require(pbkrtest)
+require(itsadug)
+library(broom)
+library(kableExtra)
+library(parallel)
+library(scales)
+source('~/projects/brain_iron/TakiMeeting/plotGAMM_Bart.R')
+source('/Users/larsenb/software/ComBatHarmonization-master/R/scripts/combat.R')
+source('/Users/larsenb/software/ComBatHarmonization-master/R/scripts/utils.R')
+knitr::opts_knit$set(root.dir = "/data/jux/BBL/projects/brain_iron/scripts/analysis/")
+theme_set(theme_classic())
+```
+
+```{r make cluster, include=F}
+ 
+# library(doParallel)
+cl <- makeCluster(rep("localhost",20))
+# registerDoParallel(cl)
+```
+ 
+## Relevant functions:
+### GAMM modeling
+```{r gamm}
+gamm_model <- function(df, model_formula, this_label, smooth_var, int_var = NULL,weight_var = NULL,group_var, pbootstrap = F, longPlot = F){
+  cat(sprintf("\n\n### Results for %s\n",this_label))
+  if (is.null(weight_var)) {
+    df$weight <- 1
+  } else {
+    df$weight <- unlist(df[,weight_var])
+  }
+
+  model_formula <- as.formula(model_formula)
+  if(!"exclusions" %in% colnames(df))  {
+    df$exclusions <- FALSE; #there is no exclusions column so make one that excludes none
+  }
+
+  g1<-gamm(model_formula,
+           data=df,
+           random = list(bblid =~ 1),
+           subset = exclusions == F,
+           weights = weight)
+  if (pbootstrap == T) {
+    g1$pb<-pboot(g1)
+    print(g1$pb %>%
+      summary() %>%
+      .$test %>%
+      as.data.frame() %>%
+      kable(caption = sprintf("Parametric Bootstrap test for %s",this_label)) %>%
+      kable_styling(full_width = F, position = "left",bootstrap_options = c("striped"))
+    )
+    
+    if (isTRUE(all.equal(g1$pb$bestmod,model_formula))) {
+      cat("The initial (more complicated) model is best")
+      g <- g1
+      # t<-terms(g1$gam$formula)
+      # tnew <- drop.terms(t,2:3,keep.response = T)
+      # rightside<-as.character(reformulate(attr(tnew,"term.labels")))[2]
+      # rightside <- rightside %>% gsub("ti","te",.) %>% gsub("fx = T","fx = F",.)
+      # plot_formula <- as.formula(sprintf("R2s ~ %s",rightside))
+      if (str_detect(deparse(model_formula),"F1_Social_Cognition_Efficiency") &this_label == "Right_Pallidum_male") {
+        plot_formula <- model_formula
+      } else {
+      plot_formula <- as.formula(gsub(", fx = T","",deparse(model_formula)))
+      }
+      cat(deparse(plot_formula))
+      plotg<-g
+      # plotg <- gamm(plot_formula,
+      #               data = df,
+      #               random = list(bblid =~1),
+      #               subset = exclusions == F)
+    } else {
+      cat("The simpler model is best")
+      
+      g <-gamm(as.formula(g1$pb$bestmod),
+               data=df,
+               random = list(bblid =~ 1),
+               subset = exclusions == F,
+               weights = weight)
+      plot_formula <- as.formula(gsub("ti\\(",'te\\(',deparse(g$gam$formula)) %>% gsub(", fx = T", "", .))
+      plotg<-g
+      # plotg <-gamm(plot_formula,
+      #          data=df,
+      #          random = list(bblid =~ 1),
+      #          subset = exclusions == F)
+    }
+  } else {
+    if (!is.null(int_var)) {
+      s<-summary(g1$gam)
+      if (s$s.table[grep(x=rownames(s$s.table),pattern = int_var),"p-value"] <.505)  {
+        g <- g1
+        plot_formula <- as.formula(gsub(", fx = T", "", deparse(model_formula)))
+        plotg <- g
+      } else {
+        cat("The simpler model is best")
+        thisResp <- as.character(g1$gam$terms[[2]])
+        theseVars <- attr(terms(model_formula),"term.labels")
+        new_formula <- reformulate(theseVars[0:(length(theseVars)-1)],response = thisResp)
+        
+        g <-gamm(as.formula(new_formula),
+                 data=df,
+                 random = list(bblid =~ 1),
+                 subset = exclusions == F,
+                 weights = weight)
+        plot_formula <- as.formula(gsub("ti\\(",'te\\(',deparse(g$gam$formula)) %>% gsub(", fx = T", "", .))
+        plotg<-g
+    }
+    } else {
+      g <- g1
+        plot_formula <- as.formula(gsub(", fx = T", "", deparse(model_formula)))
+        plotg <- g
+    }
+  }
+
+  g$gam$data<-df %>%
+    filter(exclusions == F)
+  
+  #Display model results
+  #Send final model to visualizer:
+
+
+  #cell_spec(.$p,bold = (ifelse(.$p < .05, "TRUE", "FALSE"))) %>%
+  
+  # s_tidytable<- tidy(g$gam) %>% 
+  #   kable(caption = sprintf("Regression table for smooth terms from gamm in %s",this_label)) %>% 
+  #   kable_styling(full_width = F, position = "left")
+  # 
+  # p_tidytable <- tidy(g$gam,parametric = T)%>% 
+  #   kable(caption = sprintf("Regression table for parametric terms from gamm in %s",this_label)) %>% 
+  #   kable_styling(full_width = F, position = "left")
+  # print(p_tidytable)
+  # print(s_tidytable)
+
+  s_tidytable<- tidy(g$gam)
+  p_tidytable <- tidy(g$gam,parametric = T)
+  snames = names(s_tidytable)
+  pnames = names(p_tidytable)
+  names(s_tidytable)=pnames
+  stattable <- rbind(p_tidytable,snames,s_tidytable) %>%
+    kable(caption = sprintf("Regression table from gamm in %s",this_label)) %>% 
+    kable_styling(full_width = F, position = "left")
+  print(stattable)
+  
+  if (s_tidytable$p.value[nrow(s_tidytable)]<.05) {
+    if (longPlot == T) {
+      g$pl <- longitudinal_plot(g,plabels = this_label)
+    } else {
+      g$pl <- visualize_models(plotg,plabels = this_label, smooth_var = smooth_var, int_var = int_var, group_var = group_var)
+    }
+  }
+  
+  
+  
+  #Return result object
+  result <- g
+  
+  return(result)
+}
+```
+
+### Bootstrap procedure
+This procedure is lifted from https://github.com/PennBBL/groupAnalysis/wiki/Model-Comparison-Using-Parametric-Bootstrap
+```{r include=T,opts.label = "Bootstrap Function"}
+## Parametric bootstrap of likelihood ratio test for nested models
+pboot <- function(modelobj){
+  numsims <- 500
+
+  df <- modelobj$gam$model
+  thisResp <- as.character(modelobj$gam$terms[[2]])
+  f1 <- modelobj$gam$formula
+  theseVars <- attr(terms(f1),"term.labels")
+  f2 <- reformulate(theseVars[0:(length(theseVars)-1)],response = thisResp)
+  
+  g1 <- gam(f1,data = df,weights = `(weights)`)
+  g2 <- gam(f2,data = df,weights = `(weights)`)
+
+  mat1 <- model.matrix(g1)
+  mat2 <- model.matrix(g2)
+
+  bblid<-df$bblid
+  y <- df[,thisResp]
+  w <- unlist(df[,"(weights)"])
+  
+  m1 <- lmer(y ~ -1 + mat1 + (1|bblid),weights = w)
+  m2 <- lmer(y ~ -1 + mat2 + (1|bblid),weights = w)
+  cat("\ncreating bootstrap ref dist\n")
+  refdist <- PBrefdist(m1, m2, nsim=numsims)#, cl=cl)
+  cat("\nfinished bootstrap ref dist\n")
+  pb <- PBmodcomp(m1, m2, ref = refdist)
+  int_pval <- pb$test["PBtest","p.value"]
+  if (int_pval < .05) {
+    pb$bestmod <- f1
+  } else {
+    pb$bestmod <- f2
+  }
+  cat("\ngot best mod\n")
+  return(pb)
+}
+```
+
+```{r visual func, include=FALSE}
+# Func to visualize model outputs
+visualize_models <- function(modobj,smooth_var, int_var ,group_var, plabels = NULL,check_diagnostics = F){
+  if (any(class(modobj)=="gam")) {
+    model <- modobj
+  } else if (class(modobj$gam)=="gam") {
+    model <- modobj$gam
+  } else {
+    stop("Can't find a gam object to plot")
+  }
+
+  ## Plot using mgcViz functions
+  #l_fitRaster(pTrans = function(.p) .p<0.05)
+  b <- getViz(model)
+  var_plot <- plot(b,allTerms = T) + 
+    l_ciPoly() +
+    l_fitRaster() + l_fitContour() + 
+    l_points() +  l_ciBar() +
+    l_fitPoints(size = 1, col = 2) + l_fitLine() +
+    labs(title = plabels)
+  # mtext(plabels, outer = TRUE, cex = 1.5)
+
+  print(var_plot,pages = 1) 
+
+  # line plot
+  np <- 10000 #number of predicted values
+  df = model$model
+
+  theseVars <- attr(model$terms,"term.labels")
+  varClasses <- attr(model$terms,"dataClasses")
+  thisResp <- as.character(model$terms[[2]])
+
+  if (!is.null(int_var)&any(grepl(x=as.character(model$formula),pattern = int_var))) {
+    switch (varClasses[int_var],
+      "numeric" = {
+        q <- quantile(df[,int_var],probs = c(.05,.95))
+        bigq <- q[[2]]
+        smallq <- q[[1]]
+        values <- c(bigq,smallq)
+        labs <- c(sprintf("high (%1.2f)",bigq),sprintf("low (%1.2f)",smallq))
+
+        #Get plot color break values
+        # q <- quantile(df[,int_var],probs = c(0,.1,.5,.9,1))
+        # break_values <- unname(q)
+        # break_labels <- names(q)
+        # limit_values <- c(q[[1]],q[[length(q)]])
+
+        q <-quantile(rescale(df[,int_var],c(0,1)),probs = c(0,.5,1))
+        limit_values <- c(q[[1]],q[[length(q)]])
+        midpoint_val <- unname(q[[2]])
+        cbar_vals <- unname(q)
+        grad_fill = T
+      },
+      "factor" = {
+        labs <- levels(df[,int_var])
+        values <- levels(df[,int_var])
+        grad_fill = F
+      },
+      "ordered" = {
+        labs <- levels(df[,int_var])
+        values <- levels(df[,int_var])
+        grad_fill = F
+      }
+    )
+    labPred <- data.frame(init = rep(0,np*length(labs)))
+    labPred[,int_var] = rep(values,each = np)
+    labPred$lab = rep(labs,each = np)
+    labPred <- labPred[,names(labPred) !="init"]
+    thisPred <- data.frame(init = rep(0,np))
+    for (v in c(1:length(theseVars))) {
+      thisVar <- theseVars[[v]]
+      thisClass <- varClasses[thisVar]
+      if (thisVar == smooth_var) {
+        thisPred[,smooth_var] = seq(min(df[,smooth_var],na.rm = T),max(df[,smooth_var],na.rm = T), length.out = np)
+      } else if (v == int_var) {
+        next
+      } else {
+        switch (thisClass,
+            "numeric" = {thisPred[,thisVar] = median(df[,thisVar])},
+            "factor" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]},
+            "ordered" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]}
+              )
+      }
+    }
+
+    thisPred <- thisPred %>% select(-init)
+    thisPred <- do.call("rbind", replicate(length(labs), thisPred, simplify = FALSE))
+
+    pred <- cbind(labPred,thisPred)
+    p<-data.frame(predict(modobj$gam,pred,se.fit = T))
+    pred <- cbind(pred,p)
+    pred$selo <- pred$fit - 2*pred$se.fit
+    pred$sehi <- pred$fit + 2*pred$se.fit
+    pred[,group_var] = NA
+    pred[,thisResp] = 1
+
+    high_color = "#d73027"
+    low_color = "#4575b4"
+      #scale_color_gradientn(colors = c("blue4","blue","linen","red","red4"),limits = limit_values,breaks = break_values, labels = break_labels)
+    #scale_fill_manual(values = c("red","blue")) +
+    if (grad_fill == T) {
+      p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp, color = int_var)) +
+      geom_point(alpha = .6) + geom_line(aes(group = bblid),alpha = .6) +
+      scale_color_gradientn(colors = c(low_color,high_color), values = cbar_vals) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi", fill = "lab"),alpha = .5, linetype = 0) +
+      scale_fill_manual(values = c(high_color,low_color)) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit",group = "lab"),size =1) +
+      labs(title = plabels, y = "R2*", x = "Age (years)", col = int_var)
+    } else {
+    p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp, color = int_var)) +
+      geom_point(alpha = .6) + geom_line(aes(group = bblid),alpha = .6) +
+      scale_color_brewer(type = "qual",palette = 6) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi", fill = int_var),alpha = .5, linetype = 0) +
+      scale_fill_brewer(type = "qual",palette = 6) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit",group = int_var,color = int_var),size =1) +
+      labs(title = plabels, y = "R2*", x = "Age (years)", col = int_var)
+    }
+    if (str_detect(plabels,"Accumbens")) {
+      p1 <- p1 + ylim(10,35)
+    } else if (str_detect(plabels,"Pallidum")) {
+      p1 <- p1 + ylim(12,40)
+    } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+      p1 <- p1 + ylim(10,25)
+    }
+  print(p1)
+  } else {
+
+  # line plot
+    thisPred <- data.frame(init = rep(0,np))
+
+    for (v in c(1:length(theseVars))) {
+      thisVar <- theseVars[[v]]
+      thisClass <- varClasses[thisVar]
+      if (thisVar == smooth_var) {
+        thisPred[,smooth_var] = seq(min(df[,smooth_var],na.rm = T),max(df[,smooth_var],na.rm = T), length.out = np)
+      } else {
+        switch (thisClass,
+            "numeric" = {thisPred[,thisVar] = median(df[,thisVar])},
+            "factor" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]},
+            "ordered" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]}
+              )
+      }
+    }
+    pred <- thisPred %>% select(-init)
+    p<-data.frame(predict(modobj$gam,pred,se.fit = T))
+    pred <- cbind(pred,p)
+    pred$selo <- pred$fit - 2*pred$se.fit
+    pred$sehi <- pred$fit + 2*pred$se.fit
+    pred[,group_var] = NA
+    pred[,thisResp] = 1
+
+    p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp)) +
+      geom_point(alpha = .8) + geom_line(aes(group = bblid),alpha = .5) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi"),alpha = .5, linetype = 0) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit"),size =1) +
+      labs(title = plabels, y = "R2*", x = smooth_var)
+    if (str_detect(plabels,"Accumbens")) {
+      p1 <- p1 + ylim(10,35)
+    } else if (str_detect(plabels,"Pallidum")) {
+      p1 <- p1 + ylim(12,40)
+    } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+      p1 <- p1 + ylim(10,25)
+    }
+  print(p1)
+}
+  #
+  # var_plot2 <- plot(sm(b,3)) + l_fitRaster(pTrans = function(.p) .p<0.05) + l_fitContour() + l_points()
+  # print(var_plot2)
+  # print(plotRGL(sm(b, 1), fix = c("z" = 0), residuals = F))
+
+  if (check_diagnostics == T) {
+    cp <- check(b,
+    a.qq = list(method = "tnorm",
+                a.cipoly = list(fill = "light blue")),
+    a.respoi = list(size = 0.5),
+    a.hist = list(bins = 10))
+    print(cp)
+  }
+  return(var_plot)
+}
+```
+
+```{r long vis, include = FALSE}
+
+longitudinal_plot <- function(modobj,plabels = NULL){
+  df <- modobj$gam$model
+  thisResp <- as.character(modobj$gam$terms[[2]])
+
+  pred.male <- data.frame(age = seq(min(df$age,na.rm = T),max(df$age,na.rm = T), length.out = 1000), oSex = 'male',visit = "1",sequence = "B0map_onesizefitsall_v3",oRace_bwo = "1")
+  p<-data.frame(predict(modobj$gam,pred.male,se.fit = T))
+  pred.male$fit = p$fit
+  pred.male$selo = p$fit - 2*p$se.fit
+  pred.male$sehi = p$fit + 2*p$se.fit
+  pred.male[,thisResp] = 1
+  pred.male$bblid=1
+  
+  pred.female <- data.frame(age = seq(min(df$age,na.rm = T),max(df$age,na.rm = T), length.out = 1000), oSex ='female', visit="1",sequence = "B0map_onesizefitsall_v3",oRace_bwo = "1")
+  p<-data.frame(predict(modobj$gam,pred.female,se.fit = T))
+  pred.female$fit = p$fit
+  pred.female$selo = p$fit - 2*p$se.fit
+  pred.female$sehi = p$fit + 2*p$se.fit
+  pred.female[,thisResp] = 1
+  pred.female$bblid=1
+
+  # p1 <- ggplot(data = df,aes_string(x = "age", y = thisResp, group = "bblid",color = "oSex")) + 
+  #   geom_ribbon(data = pred.male, aes(ymin=selo, ymax=sehi), fill = "blue", alpha = .3, linetype = 0,show.legend = F) +
+  #   geom_line(data = pred.male,aes(x = age, y = fit), color = "blue",size = 1) +
+  #   geom_ribbon(data = pred.female, aes(ymin=selo, ymax=sehi), fill = "red", alpha = .3, linetype = 0,show.legend = F) +
+  #   geom_line(data = pred.female,aes(x = age, y = fit), color = "red",size = 1) +
+  #   labs(title = plabels, y = "R2*", x = "Age (years)", col = "Sex") + ylim(min(pred.female$selo-.5),NA)
+  
+  # geom_point(alpha = .25) +
+  p1 <- ggplot(data = df,aes_string(x = "age", y = thisResp, group = "bblid",color = "oSex")) +
+    geom_line(alpha = .25) + geom_point(alpha = .25) +
+    scale_color_manual(values = c("blue","red")) +
+    geom_ribbon(data = pred.male, aes(ymin=selo, ymax=sehi), fill = "blue", alpha = .3, linetype = 0,show.legend = F) +
+    geom_line(data = pred.male,aes(x = age, y = fit), color = "blue",size = 1) +
+    geom_ribbon(data = pred.female, aes(ymin=selo, ymax=sehi), fill = "red", alpha = .3, linetype = 0,show.legend = F) +
+    geom_line(data = pred.female,aes(x = age, y = fit), color = "red",size = 1) +
+    labs(title = plabels, y = "R2*", x = "Age (years)", col = "Sex")  + ylim(min(pred.female$selo-.5),NA)
+  if (str_detect(plabels,"Accumbens")) {
+    p1 <- p1 + ylim(10,30)
+  } else if (str_detect(plabels,"Pallidum")) {
+    p1 <- p1 + ylim(15,32)
+  } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+    p1 <- p1 + ylim(11,25)
+  }
+  
+  print(p1)
+}
+```
+
+```{r load data, warning=FALSE, include=FALSE}
+dataFile <- "brain_iron_data_TEMPLATE.Rda"
+if (file.exists(dataFile)) {
+  dataTable <- readRDS(file=dataFile)
+  dataTableN <- readRDS(file = "brain_iron_data_native.Rda")
+}  else {
+  source('compileData.R')
+  compileData()
+  dataTable <- readRDS(file=dataFile)
+}
+
+## See data overlaps
+library(VennDiagram)
+vdf <- dataTable %>% select(Left_Putamen,Psychosis,NAR_F1_Exec_Comp_Cog_Accuracy,GOOD)
+venn.diagram(list(R2s = which(!is.na(vdf$Left_Putamen)), Clinical = which(!is.na(vdf$Psychosis)),Cognitive = which(!is.na(vdf$NAR_F1_Exec_Comp_Cog_Accuracy)), QA = which(!is.na(vdf$GOOD))),filename = "~/test.tiff",euler.d = TRUE,fill = c("red2","blue2","yellow2","green2"),alpha = c(.5,.5,.5,.5))
+knitr::include_graphics("~/test.tiff")
+
+ 
+## Filter
+dataTable <- dataTable %>%
+  filter(bblid != 110689)%>%
+  filter(GOOD %in% c("1","2")) %>%
+  filter(sequence != 'B0map_onesizefitsall_v3_T2S' & sequence != 'B0map_v4_matchedFOV') %>% # & sequence != "b0map_v4") %>%
+  filter(!(ProjectName %in% c("DAY2_808799","FNDM1_810211","FNDM2_810211","NEFF_V2","NEFF_PILOT", "GRMPY_822831", "GRMPY_V2","GRMPY_V3")))%>%
+  filter(age<35)
+dataTable$SES_Factor <- ordered(as.numeric(dataTable$envSES>-.5),levels=c(0,1),labels=c("Low SES","High SES"))
+dataTable$Efficiency_Factor <- ordered(cut(dataTable$NAR_Overall_Efficiency,
+                                           breaks = quantile(dataTable$NAR_Overall_Efficiency,
+                                                             probs = seq(0,1,length=4),
+                                                             na.rm = T),
+                                           labels = c("low","med","hi")),
+                                       levels = c("low","med","hi"))
+dataTable$thisSES_Factor <- cut(dataTable$envSES,breaks = quantile(dataTable$envSES,probs = seq(0,1,length=4),na.rm = T),labels = c("low","med","hi"))
+dataTable$tanner_age_diff <- dataTable$age-dataTable$tanner_age
+dataTable$tanner_pubic <- ordered(dataTable$tanner_pubic, levels = c(1,2,3,4,5))
+
+# ## combat  Doesn't work :(
+# comtable <- dataTable %>%
+#   select(Caudate,Putamen,Accumbens_Area,Pallidum,sequence)%>%
+#   drop_na()
+# batch <- as.factor(comtable$sequence)
+# ctab <- comtable%>%select(-sequence)
+# comtable %>% group_by(sequence) %>% summarize(n = n())
+# combatdata <- combat(ctab,batch,eb = F)
+
+dataTableN <- dataTableN %>%
+  filter(GOOD %in% c("1","2")) %>%
+  filter(sequence != 'B0map_onesizefitsall_v3_T2S'& sequence != 'B0map_v4_matchedFOV') %>% # & sequence != "b0map_v4") %>%
+  filter(age<35)
+
+#filter((!is.na(Psychosis) | !is.na(NAR_Overall_Accuracy)) & bblid != 110689) %>%
+mtab<-dataTable %>%
+  gather(key = "ROI",value="R2s",Accumbens_Area,Putamen,Caudate,Pallidum)
+stab <-dataTable %>%
+  gather(key = "ROI",value="R2s_sd",Accumbens_Area_sd,Putamen_sd,Caudate_sd,Pallidum_sd)%>%
+  select(bblid,scanid,ROI,R2s_sd)
+stab$ROI <- gsub(stab$ROI,pattern="_sd",replacement = "")
+longTable <- mtab %>%
+  left_join(stab,by = c("bblid","scanid","ROI"))
+longTable$timepoint <- as.factor(longTable$timepoint)
+longTable <- longTable %>%
+  mutate(R2s_cv = R2s_sd/R2s)
+
+# mtab<-dataTableN %>%
+#   gather(key = "ROI",value="R2s",Accumbens_Area,Putamen,Caudate,Pallidum)
+# stab <-dataTableN %>%
+#   gather(key = "ROI",value="R2s_sd",Accumbens_Area_sd,Putamen_sd,Caudate_sd,Pallidum_sd)%>%
+#   select(bblid,scanid,ROI,R2s_sd)
+# stab$ROI <- gsub(stab$ROI,pattern="_sd",replacement = "")
+# longTableN <- mtab %>%
+#   left_join(stab,by = c("bblid","scanid","ROI"))
+# longTableN$timepoint <- as.factor(longTable$timepoint)
+# longTableN <- longTableN %>%
+#   mutate(R2s_cv = R2s_sd/R2s)
+
+```
+
+---
+# Developmental effects
+```{r developmental, results="asis",eval=F}
+# model_formula <- "R2s ~ sequence + oSex + RACE + s(age,k=4, fx=T) + s(age, k=4, fx = T, by = oSex)"
+model_formula <- "R2s ~ sequence + oSex + s(age,k=4, fx=T) + s(age, k=4, fx = T, by = oSex)"
+models <- longTable %>%
+    group_by(ROI)%>%
+    nest()%>%
+    mutate(results=purrr::pmap(list(data,model_formula,this_label = ROI, pbootstrap = F, longPlot = T),.f=gamm_model))
+```
+
+# Puberty effects
+```{r puberty,eval=F}
+# model_formula <- "R2s ~ sequence + oSex + RACE + s(age,k=4, fx=T) + s(age, k=4, fx = T, by = oSex)"
+for (roi in c("Caudate","Putamen","Accumbens_Area")) {
+  model_formula <- sprintf("%s ~ sequence + tanner_pubic_grp* oSex + (1|bblid)",roi)
+  thisTable <- dataTable %>%
+    filter(tanner_age_diff<1)
+  
+  thisTable$tanner_girl_3 <- ordered(thisTable$tanner_girl_3,levels = c(1,2),labels = c("Yes","No"))
+  
+  # model <- lmer(as.formula(model_formula), data = thisTable)
+  # print(anova(model))
+  # print(plot_model(model,type = "int"))
+  
+  
+  model_formula <- sprintf("%s ~  tanner_girl_3 + s(age, k = 4) ",roi)
+  model <- gamm(as.formula(model_formula), random = list(bblid=~1), data = thisTable, subset = thisTable$oSex=="female")
+  print(summary(model$gam))
+  b<-getViz(model$gam)
+  print(plot(b, allTerms = T),pages = 1)
+  print(BIC(model$lme))
+  
+}
+
+```
+
+## 2D smooth with additional main effects and tensor product smooth, `ti`: `ti(age) + ti(Psychosis) + ti(age,Psychosis)`
+
+From documentation: 
+This model specifies a main effects + interaction structure such as:
+`y ~ ti(x) + ti(z) + ti(x,z)`  
+
+`ti` is the proper way of specifying an interaction term in the context of included main effect terms:  
+
+"This functional ANOVA decomposition is supported by ti terms, which produce tensor product interactions from which the main effects have been excluded, under the assumption that they will be included separately. For example the ~ ti(x) + ti(z) + ti(x,z) would produce the above main effects + interaction structure. This is much better than attempting the same thing with sor te terms representing the interactions (although mgcv does not forbid it). Technically ti terms are very simple: they simply construct tensor product bases from marginal smooths to which identifiability constraints (usually sum-to-zero) have already been applied: correct nesting is then automatic (as with all interactions in a GLM framework). See Wood (2017, section 5.6.3)."  
+  
+## Clinical Variables
+We are looking at a few models:
+Age*sex effects on clin
+Age*Clin effects on Brain controlling for sex
+Age*Clin effects on Brain separated by sex
+```{r Clinical, results="asis",warning=F,eval=F}
+# clin_vars <- c("Overall_Psychopathology_SIMPLE","Psychosis"),"Psychosis1_SIMPLE","Psychosis2_SIMPLE","Psychosis3_SIMPLE","Psychosis4_SIMPLE")#,"Depression_SIMPLE","Mania_SIMPLE") #"Depression","Mania"
+clin_vars <- c("Overall_Psychopathology_SIMPLE","Mania_SIMPLE","Psychosis","Depression","Depression_SIMPLE") #"Depression","Mania"
+for (cv in clin_vars) {
+  cat(sprintf("\n\n### Results for %s",cv))
+  
+  ## First the age models
+  # model_formula <- sprintf("%s ~ oSex + timepoint + s(age,k=4, fx=T) + s(age, k=4, fx = T, by = oSex)",cv)
+  # ## For now use the same exclusions as with R2*
+  # models <- dataTable %>%
+  #   filter(scan2cnbmonths<6) %>%
+  #   gamm_model(.,model_formula,
+  #              this_label = cv,
+  #              smooth_var = "age",
+  #              group_var = "bblid",
+  #              int_var = 'oSex',
+  #              pbootstrap = F,
+  #              longPlot = F)
+  
+  # Overall
+   model_formula <- sprintf("R2s ~ sequence + timepoint + sex + ti(age, k=4, fx = T) + ti(%s, k=4, fx = T) + ti(%s,age, k=4, fx = T)",cv,cv)
+  # model_formula <- sprintf("R2s ~ timepoint + sex + s(age, k=4, fx = T)  + s(age, k=4, fx = T, by = %s)",cv)
+    # model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + ti(%s, k=4, fx = T) + ti(%s, k=4, fx = T, by = oSex)",cv,cv)
+
+   thisTab<-longTable[longTable[,cv]!=min(longTable[,cv],na.rm = T), ]
+# weight_var = "R2s_cv",
+  models <- longTable %>%
+      filter(scan2cnbmonths<6) %>%
+    filter(R2s>0&R2s<40) %>%
+      group_by(ROI)%>%
+      nest()%>%
+      mutate(results=purrr::pmap(.f=gamm_model,
+                                 list(data,model_formula,
+                                      smooth_var = "age",
+                                      int_var = cv,
+                                      group_var = "bblid",
+                                      this_label = ROI,
+                                      pbootstrap = F)))
+##weight_var = "R2s_sd",
+  # Male female
+  # model_formula <- sprintf("R2s ~ ti(age, k=4, fx = T) + ti(%s, k=4, fx = T) + ti(age,%s, k=4, fx = T)",cv,cv)
+  # models <- longTable %>%
+  #     filter(GOOD %in% c("1","2") & R2s>0 & R2s <40 & age < 50 & scan2cnbmonths<6) %>%
+  #     group_by(ROI,sex)%>%
+  #     nest()%>%
+  #     unite("ROI_SEX",c(ROI,sex),sep = "_") %>%
+  #     mutate(results=purrr::pmap(.f=gamm_model,
+  #                                list(data,model_formula,
+  #                                     smooth_var = "age",
+  #                                     int_var = cv,
+  #                                     group_var = "bblid",
+  #                                     this_label = ROI_SEX,
+  #                                     pbootstrap = F)))
+}
+
+```
+
+##SES
+###SES and cognition
+```{r ses_cog, results="asis",warning=F,eval=F}
+env_vars <- colnames(dataTable%>%select(contains("env"),neighborhoodCrime))
+cog_vars <- c("NAR_Overall_Accuracy","NAR_Overall_Efficiency","NAR_F2_Social_Cog_Accuracy","NAR_F1_Social_Cognition_Efficiency","NAR_F1_Exec_Comp_Cog_Accuracy","NAR_F3_Executive_Efficiency","NAR_F4_Memory_Efficiency","mpraxis_mp2rtcr")
+
+for (cv in env_vars) {
+  cat(sprintf("\n\n### Results for %s",cv))
+  
+  for (cog in cog_vars) {
+    # model_formula <- sprintf("%s ~ timepoint + oSex + oRace_bwo + s(age, k=4, fx = T) + s(age, by = %s, k=4, fx = T)",cog,cv,cv)
+    model_formula <- sprintf("%s ~ timepoint + oSex + oRace_bwo + %s + s(age, k=4, fx = T) ",cog,cv)
+    
+    models <- dataTable %>%
+      filter(scan2cnbmonths < 6) %>%
+      gamm_model(
+        .,
+        model_formula,
+        this_label = cog,
+        smooth_var = "age",
+        group_var = "bblid",
+        int_var = "oSex",
+        pbootstrap = T
+      )
+
+  }
+}
+
+```
+
+```{r ses, results="asis",warning=F,eval=F}
+# env_vars <- colnames(dataTable%>%select(contains("env"),neighborhoodCrime))
+env_vars <- colnames(dataTable%>%select(contains("env")))
+longTable$envHouseholds[longTable$envHouseholds>2.5 ]<- NA
+longTable$weights<- 1/longTable$R2s_cv
+for (cv in env_vars) {
+  cat(sprintf("\n\n\n### Results for %s\n",cv))  
+  
+  # model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + oRace_bwo + ti(age, k=4, fx = T) +ti(%s, k=3, fx = T) + ti(age, %s, k=3, fx = T)",cv,cv)
+  
+  # model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + oRace_bwo + Efficiency_Factor*%s + s(age, k=4, fx = T)",cv)
+  
+  # model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + s(age, k=4, fx = T)  + s(age, by = %s, k=3, fx = T)",cv,cv)
+
+  # model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + oRace_bwo + %s + I(%s^2) + s(age, k=4, fx = T)",cv,cv) # works
+  
+  model_formula <- sprintf("R2s ~ sequence + timepoint + oSex + s(age, k=4, fx = F) + s(%s, k=4, fx = F)",cv,cv)
+  
+  # weight_var = "weights",
+  models <- longTable %>%
+    filter(RACE == 1) %>%
+    group_by(ROI)%>%
+    nest()%>%
+    mutate(results=purrr::pmap(.f=gamm_model,
+                               list(data,model_formula,
+                                    smooth_var = cv,
+                                    int_var = "age",
+                                    group_var = "bblid",
+                                    this_label = ROI,
+                                    pbootstrap = F)))
+  
+  #  # Male female
+  # model_formula <- sprintf("R2s ~ sequence + timepoint + oRace_bwo + s(age, k=4, fx = T) + s(age, by = %s, k=4, fx = T)",cv,cv)
+  # models <- longTable %>%
+  #     group_by(ROI,sex)%>%
+  #     nest()%>%
+  #     unite("ROI_SEX",c(ROI,sex),sep = "_") %>%
+  #     mutate(results=purrr::pmap(.f=gamm_model,
+  #                                list(data,model_formula,
+  #                                     smooth_var = "age",
+  #                                     int_var = cv,
+  #                                     group_var = "bblid",
+  #                                     this_label = ROI_SEX,
+  #                                     pbootstrap = F)))
+}
+
+```
+
+
+## Cognitive Variables
+Run the models:
+```{r Cognitive, results="asis",warning=F, eval = T}
+#skip these for now: "F1_Exec_Comp_Cog_Accuracy","F2_Social_Cog_Accuracy","F3_Memory_Accuracy","F1_Slow_Speed","F2_Memory_Speed","F3_Fast_Speed", "Overall_Accuracy","Overall_Speed","Overall_Efficiency","NAR_F3_Memory_Accuracy","NAR_F4_Memory_Efficiency","NAR_F1_Exec_Comp_Cog_Accuracy","NAR_F2_Social_Cog_Accuracy","NAR_F1_Exec_Comp_Cog_Accuracy","NAR_F3_Executive_Efficiency","NAR_F4_Memory_Efficiency"
+
+cog_vars <- c("NAR_Overall_Accuracy","NAR_Overall_Efficiency","NAR_F2_Social_Cog_Accuracy","NAR_F1_Social_Cognition_Efficiency","mpraxis_mp2rtcr")
+
+for (cv in cog_vars) {
+  cat(sprintf("\n### Results for %s\n",cv))
+  
+  # ## First the age models
+  # model_formula <- sprintf("%s ~  timepoint + oSex + s(age,k=4, fx=T) + s(age, k=4, fx = T, by = oSex)",cv)
+  # ## For now use the same exclusions as with R2*
+  # models <- dataTable %>%
+  #   filter(scan2cnbmonths<6) %>%
+  #   gamm_model(.,model_formula,
+  #              this_label = cv,
+  #              smooth_var = "age",
+  #              group_var = "bblid",
+  #              int_var = 'oSex',
+  #              pbootstrap = F,
+  #              longPlot = F)
+  # 
+
+  # model_formula <- sprintf("R2s ~ timepoint + sequence +  sex + ti(age, k=4, fx = T) + ti(%s, k=4, fx = T) + ti(age,%s, k=3, fx = T)",cv,cv)
+
+  model_formula <- sprintf("R2s ~ timepoint + oSex + s(age, k=4, fx = F) + s(%s, k=4, fx = F)",cv)
+
+  thisTable <- longTable
+  if (str_detect(cv,"pcet")) {
+    thisTable$exclusions <- thisTable$scan2cnbmonths>6 | thisTable$pcet_rtcr>5500 #There are some outliers here
+  } else if (cv == "mpraxis_mp2rtcr") {
+    thisTable$exclusions <- thisTable$scan2motormonths>6 | thisTable$mpraxis_mp2rtcr>1500
+  }
+  else {
+    thisTable$exclusions <- thisTable$scan2cnbmonths>6
+  }
+  
+  # #weight_var = "R2s_cv",
+  #int_var = cv,
+  models <- thisTable %>%
+      group_by(ROI)%>%
+      nest()%>%
+      mutate(results=purrr::pmap(list(data,model_formula,
+                                      this_label = ROI,
+                                      smooth_var = "age",
+                                      int_var = cv,
+                                      group_var = "bblid",
+                                      pbootstrap = F),
+                                 .f=gamm_model))
+  
+  model_formula <- sprintf("R2s ~ timepoint + sex + s(age, k=4, fx = F) + s(age, by = %s, k=4, fx = F)",cv,cv)
+  
+  models <- thisTable %>%
+      group_by(ROI)%>%
+      nest()%>%
+      mutate(results=purrr::pmap(list(data,model_formula,
+                                      this_label = ROI,
+                                      smooth_var = "age",
+                                      int_var = cv,
+                                      group_var = "bblid",
+                                      pbootstrap = F),
+                                 .f=gamm_model))
+  # 
+  # Male female
+  model_formula <- sprintf("R2s ~ timepoint + s(age) + s(age, by = %s, k=4)",cv)
+  models <- longTable %>%
+      group_by(ROI,sex)%>%
+      nest()%>%
+      unite("ROI_SEX",c(ROI,sex),sep = "_") %>%
+      mutate(results=purrr::pmap(.f=gamm_model,
+                                 list(data,model_formula,
+                                      smooth_var = "age",
+                                      int_var = cv,
+                                      group_var = "bblid",
+                                      this_label = ROI_SEX,
+                                      pbootstrap = F)))
+}
+
+```
+
+## Tanner cog
+Run the models:
+```{r Tanner Cognitive, results="asis",warning=F, eval = F}
+#skip these for now: "F1_Exec_Comp_Cog_Accuracy","F2_Social_Cog_Accuracy","F3_Memory_Accuracy","F1_Slow_Speed","F2_Memory_Speed","F3_Fast_Speed", "Overall_Accuracy","Overall_Speed","Overall_Efficiency","NAR_F3_Memory_Accuracy","NAR_F4_Memory_Efficiency","NAR_F1_Exec_Comp_Cog_Accuracy","NAR_F2_Social_Cog_Accuracy",
+
+cog_vars <- c("NAR_Overall_Accuracy","NAR_Overall_Efficiency","NAR_F2_Social_Cog_Accuracy","NAR_F1_Social_Cognition_Efficiency","NAR_F1_Exec_Comp_Cog_Accuracy","NAR_F3_Executive_Efficiency","NAR_F4_Memory_Efficiency","mpraxis_mp2rtcr")
+
+for (cv in cog_vars) {
+  cat(sprintf("\n### Results for %s\n",cv))
+
+  thisTable <- dataTable
+  if (str_detect(cv,"pcet")) {
+    thisTable$exclusions <- thisTable$scan2cnbmonths>6 | thisTable$pcet_rtcr>5500 #There are some outliers here
+  } else if (cv == "mpraxis_mp2rtcr") {
+    thisTable$exclusions <- thisTable$scan2motormonths>6 | thisTable$mpraxis_mp2rtcr>1500
+  }
+  else {
+    thisTable$exclusions <- thisTable$scan2cnbmonths>6
+  }
+
+  for (roi in c("Putamen","Caudate","Accumbens_Area")) {
+    model_formula <- sprintf("%s ~ timepoint + sequence + tanner_pubic_grp*%s + (1|bblid) ",roi,cv)
+    # g<-gamm(as.formula(model_formula), data = thisTable, random = list(bblid=~1),
+    #         subset = thisTable$oSex=='female' & !thisTable$exclusions)
+    g<-lmerTest::lmer(as.formula(model_formula), data = thisTable,
+            subset = thisTable$oSex=='female' & !thisTable$exclusions)
+    print(summary(g))
+    # b <- getViz(g$gam)
+    # var_plot <- plot(b,allTerms = T) + 
+    # l_ciPoly() +
+    # l_fitRaster() + l_fitContour() + 
+    # l_points() +  l_ciBar() +
+    # l_fitPoints(size = 1, col = 2) + l_fitLine() +
+    # labs(title = paste(roi,'_',cv))
+    # print(var_plot, pages =1)
+    print(plot_model(g,type = "int"))
+    
+  }
+}
+
+```
+
+## IQ Variables
+Run the models:
+```{r IQ, results="asis",eval=F}
+cog_vars <- c("wrat4_std","wrat4_raw") #"wrat3_raw",
+for (cv in cog_vars) {
+  cat(sprintf("/n/n### Results for %s",cv))
+  model_formula <- sprintf("R2s ~ sex + ti(age, k=4, fx = T) + ti(%s, k=4, fx = T) + ti(age,%s, k=4, fx = T)",cv,cv)
+  thisTable <- longTable
+  if (str_detect(cv,"wrat4")) {
+    thisTable$exclusions <- thisTable$scan2wratmonths>6 | thisTable$age>=40 #There is one old person
+  } else {
+    thisTable$exclusions <- thisTable$scan2wratmonths>6
+  }
+  models <- thisTable %>%
+      group_by(ROI)%>%
+      nest()%>%
+      mutate(results=purrr::pmap(list(data,model_formula,
+                                      this_label = ROI,
+                                      smooth_var = "age",
+                                      int_var = cv,
+                                      group_var = "bblid", 
+                                      pbootstrap = T),
+                                 .f=gamm_model))
+}
+
+```
+

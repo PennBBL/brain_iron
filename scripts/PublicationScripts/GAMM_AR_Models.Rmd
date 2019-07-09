@@ -1,0 +1,554 @@
+---
+title: "Age-regressed GAMM Interaction models"
+author: "Bart"
+date: "5/20/2019"
+output:
+  html_document: default
+  toc: true
+  # pdf_document: default
+---
+
+# Age and other covariates regressed out of the brain and behavior measures. The residuals are used in the models.
+
+---
+
+```{r setup, include=FALSE}
+## Load Libraries
+require(ggplot2)
+require(gridExtra)
+require(tidyverse)
+require(mgcv)
+require(gamm4)
+require(mgcViz)
+require(sjPlot)
+require(pbkrtest)
+require(itsadug)
+library(broom)
+library(kableExtra)
+library(parallel)
+library(scales)
+source('~/projects/brain_iron/TakiMeeting/plotGAMM_Bart.R')
+source('/Users/larsenb/software/ComBatHarmonization-master/R/scripts/combat.R')
+source('/Users/larsenb/software/ComBatHarmonization-master/R/scripts/utils.R')
+knitr::opts_knit$set(root.dir = "/data/jux/BBL/projects/brain_iron/scripts/analysis/")
+theme_set(theme_classic())
+```
+
+## Relevant functions:
+### GAMM modeling
+```{r gamm}
+# This function:
+# 1. executes the GAMM model,
+# 2. sends output to the parametric bootstrap (if requested),
+# 3. prints a regression table, and 
+# 4. sends the model to the visualizer for plotting.
+
+gamm_model <- function(df, model_formula, this_label, smooth_var, int_var = NULL,weight_var = NULL,group_var, pbootstrap = F, longPlot = F, model_test = T){
+  cat(sprintf("\n\n### Results for %s\n",this_label))
+  if (is.null(weight_var)) {
+    df$weight <- 1 #if no weighting variable is provided, weight all obs equally.
+  } else {
+    df$weight <- unlist(df[,weight_var]) # Use weight variable if provided.
+  }
+
+  model_formula <- as.formula(model_formula)
+  if(!"exclusions" %in% colnames(df))  {
+    df$exclusions <- FALSE; #there is no exclusions column so make one that excludes none
+  }
+
+  g1<-gamm(model_formula,
+           data=df,
+           random = list(bblid =~ 1),
+           subset = exclusions == F,
+           weights = weight)
+  
+  if (model_test == T){
+    if (pbootstrap == T) {
+      #Send to bootstrap function
+      g1$pb<-pboot(g1) 
+      #Print a table that shows the bootstrap outcome
+      print(g1$pb %>%
+        summary() %>%
+        .$test %>%
+        as.data.frame() %>%
+        kable(caption = sprintf("Parametric Bootstrap test for %s",this_label)) %>%
+        kable_styling(full_width = F, position = "left",bootstrap_options = c("striped"))
+      )
+      
+      if (isTRUE(all.equal(g1$pb$bestmod,model_formula))) {
+        cat("The initial (more complicated) model is best")
+        g <- g1
+        
+        #This next part is no longer implemented (refit the model using unfixed degrees of freedom). Effective part is commented out below.
+        if (str_detect(deparse(model_formula),"F1_Social_Cognition_Efficiency") &this_label == "Right_Pallidum_male") {
+          plot_formula <- model_formula
+        } else {
+        plot_formula <- as.formula(gsub(", fx = T","",deparse(model_formula)))
+        }
+        cat(deparse(plot_formula))
+        plotg<-g
+        # plotg <- gamm(plot_formula,
+        #               data = df,
+        #               random = list(bblid =~1),
+        #               subset = exclusions == F)
+      } else {
+        cat("The simpler model is best")
+        
+        g <-gamm(as.formula(g1$pb$bestmod),
+                 data=df,
+                 random = list(bblid =~ 1),
+                 subset = exclusions == F,
+                 weights = weight)
+        
+        #Again, this part not implemented (model not refit with unfixed df)
+        plot_formula <- as.formula(gsub("ti\\(",'te\\(',deparse(g$gam$formula)) %>% gsub(", fx = T", "", .))
+        plotg<-g
+        # plotg <-gamm(plot_formula,
+        #          data=df,
+        #          random = list(bblid =~ 1),
+        #          subset = exclusions == F)
+      }
+    } else {
+      if (!is.null(int_var)) {
+        # We are not bootstrapping, but there is an interaction variable
+        s<-summary(g1$gam)
+        if (s$s.table[grep(x=rownames(s$s.table),pattern = int_var),"p-value"] <.05)  {
+          #Checked if interaction is sig, if so keep in the model
+          g <- g1
+          plot_formula <- as.formula(gsub(", fx = T", "", deparse(model_formula)))
+          plotg <- g
+        } else {
+          #Interaction is not sig, remove from the model
+          cat("The simpler model is best")
+          thisResp <- as.character(g1$gam$terms[[2]])
+          theseVars <- attr(terms(model_formula),"term.labels")
+          new_formula <- reformulate(theseVars[0:(length(theseVars)-1)],response = thisResp)
+          
+          g <-gamm(as.formula(new_formula),
+                   data=df,
+                   random = list(bblid =~ 1),
+                   subset = exclusions == F,
+                   weights = weight)
+          plot_formula <- as.formula(gsub("ti\\(",'te\\(',deparse(g$gam$formula)) %>% gsub(", fx = T", "", .))
+          plotg<-g
+      }
+      } else {
+        #There is no interaction term, just plot.
+        g <- g1
+          plot_formula <- as.formula(gsub(", fx = T", "", deparse(model_formula)))
+          plotg <- g
+      }
+    }
+  } else {
+    g <- g1
+    plotg<-g
+  }
+
+  g$gam$data<-df %>%
+    filter(exclusions == F)
+  
+  #Display model results:
+  
+  s_tidytable<- tidy(g$gam)
+  p_tidytable <- tidy(g$gam,parametric = T)
+  snames = names(s_tidytable)
+  pnames = names(p_tidytable)
+  names(s_tidytable)=pnames
+  thisBIC <- BIC(g$lme)
+  numObs <- g$lme$dims$N
+  g$BIC <- thisBIC
+  stattable <- rbind(p_tidytable,snames,s_tidytable) %>%
+    kable(caption = sprintf("Regression table from gamm in %s, BIC = %1.2f, obs = %d",this_label,thisBIC,numObs)) %>% 
+    kable_styling(full_width = F, position = "left")
+  print(stattable)
+  
+  #Send final model to visualizer:
+  if (s_tidytable$p.value[nrow(s_tidytable)]<.05) {
+    if (longPlot == T) {
+      g$pl <- longitudinal_plot(g,plabels = this_label)
+    } else {
+      g$pl <- visualize_models(plotg,plabels = this_label, smooth_var = smooth_var, int_var = int_var, group_var = group_var)
+    }
+  }
+  #Return result object
+  result <- g
+  
+  return(result)
+}
+```
+
+### Bootstrap procedure
+This procedure is lifted from https://github.com/PennBBL/groupAnalysis/wiki/Model-Comparison-Using-Parametric-Bootstrap
+```{r include=T,opts.label = "Bootstrap Function"}
+## Parametric bootstrap of likelihood ratio test for nested models
+pboot <- function(modelobj){
+  numsims <- 500
+
+  df <- modelobj$gam$model
+  thisResp <- as.character(modelobj$gam$terms[[2]])
+  f1 <- modelobj$gam$formula
+  theseVars <- attr(terms(f1),"term.labels")
+  f2 <- reformulate(theseVars[0:(length(theseVars)-1)],response = thisResp)
+  
+  g1 <- gam(f1,data = df,weights = `(weights)`)
+  g2 <- gam(f2,data = df,weights = `(weights)`)
+
+  mat1 <- model.matrix(g1)
+  mat2 <- model.matrix(g2)
+
+  bblid<-df$bblid
+  y <- df[,thisResp]
+  w <- unlist(df[,"(weights)"])
+  
+  m1 <- lmer(y ~ -1 + mat1 + (1|bblid),weights = w)
+  m2 <- lmer(y ~ -1 + mat2 + (1|bblid),weights = w)
+  refdist <- PBrefdist(m1, m2, nsim=numsims)#, cl=cl)
+  pb <- PBmodcomp(m1, m2, ref = refdist)
+  int_pval <- pb$test["PBtest","p.value"]
+  if (int_pval < .05) {
+    pb$bestmod <- f1
+  } else {
+    pb$bestmod <- f2
+  }
+  return(pb)
+}
+```
+
+```{r visual func, include=FALSE}
+# Func to visualize model outputs
+visualize_models <- function(modobj,smooth_var, int_var ,group_var, plabels = NULL,check_diagnostics = F){
+  if (any(class(modobj)=="gam")) {
+    model <- modobj
+  } else if (class(modobj$gam)=="gam") {
+    model <- modobj$gam
+  } else {
+    stop("Can't find a gam object to plot")
+  }
+
+  ## Plot using mgcViz functions
+  # Uses premade function to get all terms plotted
+  b <- getViz(model)
+  var_plot <- plot(b,allTerms = T) + 
+    l_ciPoly() +
+    l_fitRaster() + l_fitContour() + 
+    l_points() +  l_ciBar() +
+    l_fitPoints(size = 1, col = 2) + l_fitLine() +
+    labs(title = plabels)
+  # mtext(plabels, outer = TRUE, cex = 1.5)
+
+  print(var_plot,pages = 1) 
+
+  ## Generate custom line plot
+  np <- 10000 #number of predicted values
+  df = model$model
+
+  theseVars <- attr(model$terms,"term.labels")
+  varClasses <- attr(model$terms,"dataClasses")
+  thisResp <- as.character(model$terms[[2]])
+
+  if (!is.null(int_var)) {
+    if (!any(grepl(x=as.character(model$formula),pattern = int_var))) {
+      return()
+    }
+   vg<-vis.gam(model,view = c(smooth_var,int_var),plot.type = "persp",theta = 45,phi = -5,color = "topo")
+   print(vg)
+    switch (varClasses[int_var],
+      "numeric" = {
+        q <- quantile(df[,int_var],probs = c(.05,.95)) #pick 5% and 95% to plot
+        bigq <- q[[2]]
+        smallq <- q[[1]]
+        values <- c(bigq,smallq)
+        labs <- c(sprintf("high (%1.2f)",bigq),sprintf("low (%1.2f)",smallq))
+
+        #Get plot color break values
+        # q <- quantile(df[,int_var],probs = c(0,.1,.5,.9,1))
+        # break_values <- unname(q)
+        # break_labels <- names(q)
+        # limit_values <- c(q[[1]],q[[length(q)]])
+
+        q <-quantile(rescale(df[,int_var],c(0,1)),probs = c(0,.5,1))
+        limit_values <- c(q[[1]],q[[length(q)]])
+        midpoint_val <- unname(q[[2]])
+        cbar_vals <- unname(q)
+        grad_fill = T
+      },
+      "factor" = {
+        labs <- levels(df[,int_var])
+        values <- levels(df[,int_var])
+        grad_fill = F
+      },
+      "ordered" = {
+        labs <- levels(df[,int_var])
+        values <- levels(df[,int_var])
+        grad_fill = F
+      }
+    )
+    labPred <- data.frame(init = rep(0,np*length(labs)))
+    labPred[,int_var] = rep(values,each = np)
+    labPred$lab = rep(labs,each = np)
+    labPred <- labPred[,names(labPred) !="init"]
+    thisPred <- data.frame(init = rep(0,np))
+    for (v in c(1:length(theseVars))) {
+      thisVar <- theseVars[[v]]
+      thisClass <- varClasses[thisVar]
+      if (thisVar == smooth_var) {
+        thisPred[,smooth_var] = seq(min(df[,smooth_var],na.rm = T),max(df[,smooth_var],na.rm = T), length.out = np)
+      } else if (v == int_var) {
+        next
+      } else {
+        switch (thisClass,
+            "numeric" = {thisPred[,thisVar] = median(df[,thisVar])},
+            "factor" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]},
+            "ordered" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]}
+              )
+      }
+    }
+
+    thisPred <- thisPred %>% select(-init)
+    thisPred <- do.call("rbind", replicate(length(labs), thisPred, simplify = FALSE))
+
+    pred <- cbind(labPred,thisPred)
+    p<-data.frame(predict(modobj$gam,pred,se.fit = T))
+    pred <- cbind(pred,p)
+    pred$selo <- pred$fit - 2*pred$se.fit
+    pred$sehi <- pred$fit + 2*pred$se.fit
+    pred[,group_var] = NA
+    pred[,thisResp] = 1
+
+    low_color = "#7b3294"
+    high_color = "#008837"
+      #scale_color_gradientn(colors = c("blue4","blue","linen","red","red4"),limits = limit_values,breaks = break_values, labels = break_labels)
+    #scale_fill_manual(values = c("red","blue")) +
+    if (grad_fill == T) {
+      p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp, color = int_var)) +
+      geom_point(alpha = .5) + geom_line(aes(group = bblid),alpha = .5) +
+      scale_color_gradientn(colors = c(low_color,high_color), values = cbar_vals) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi", fill = "lab"),alpha = .5, linetype = 0) +
+      scale_fill_manual(values = c(high_color,low_color)) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit",group = "lab"),size =1) +
+      labs(title = plabels, y = "R2*", x = "Age (years)", col = int_var)
+    } else {
+    p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp, color = int_var)) +
+      geom_point(alpha = .5) + geom_line(aes(group = bblid),alpha = .5) +
+      scale_color_brewer(type = "qual",palette = 6) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi", fill = int_var),alpha = .5, linetype = 0) +
+      scale_fill_brewer(type = "qual",palette = 6) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit",group = int_var,color = int_var),size =1) +
+      labs(title = plabels, y = "R2*", x = "Age (years)", col = int_var)
+    }
+    if (str_detect(plabels,"Accumbens")) {
+      p1 <- p1 + ylim(10,35)
+    } else if (str_detect(plabels,"Pallidum")) {
+      p1 <- p1 + ylim(12,40)
+    } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+      p1 <- p1 + ylim(10,25)
+    }
+  print(p1)
+  } else {
+
+  # line plot
+    thisPred <- data.frame(init = rep(0,np))
+
+    for (v in c(1:length(theseVars))) {
+      thisVar <- theseVars[[v]]
+      thisClass <- varClasses[thisVar]
+      if (thisVar == smooth_var) {
+        thisPred[,smooth_var] = seq(min(df[,smooth_var],na.rm = T),max(df[,smooth_var],na.rm = T), length.out = np)
+      } else {
+        switch (thisClass,
+            "numeric" = {thisPred[,thisVar] = median(df[,thisVar])},
+            "factor" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]},
+            "ordered" = {thisPred[,thisVar] = levels(df[,thisVar])[[1]]}
+              )
+      }
+    }
+    pred <- thisPred %>% select(-init)
+    p<-data.frame(predict(modobj$gam,pred,se.fit = T))
+    pred <- cbind(pred,p)
+    pred$selo <- pred$fit - 2*pred$se.fit
+    pred$sehi <- pred$fit + 2*pred$se.fit
+    pred[,group_var] = NA
+    pred[,thisResp] = 1
+
+    p1 <- ggplot(data = df, aes_string(x = smooth_var,y = thisResp)) +
+      geom_point(alpha = .5) + geom_line(aes(group = bblid),alpha = .5) +
+      geom_ribbon(data = pred,aes_string(x = smooth_var , ymin = "selo",ymax = "sehi"),alpha = .5, linetype = 0) +
+      geom_line(data = pred,aes_string(x = smooth_var, y = "fit"),size =1) +
+      labs(title = plabels, y = "R2*", x = smooth_var)
+    if (str_detect(plabels,"Accumbens")) {
+      p1 <- p1 + ylim(10,35)
+    } else if (str_detect(plabels,"Pallidum")) {
+      p1 <- p1 + ylim(12,40)
+    } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+      p1 <- p1 + ylim(10,25)
+    }
+  print(p1)
+}
+  #
+  # var_plot2 <- plot(sm(b,3)) + l_fitRaster(pTrans = function(.p) .p<.05) + l_fitContour() + l_points()
+  # print(var_plot2)
+  # print(plotRGL(sm(b, 1), fix = c("z" = 0), residuals = F))
+
+  if (check_diagnostics == T) {
+    cp <- check(b,
+    a.qq = list(method = "tnorm",
+                a.cipoly = list(fill = "light blue")),
+    a.respoi = list(size = 0.5),
+    a.hist = list(bins = 10))
+    print(cp)
+  }
+  return(var_plot)
+}
+```
+
+```{r long vis, include = FALSE}
+# Special case for plotting age and age*sex models. Mostly redundant now that the above function exists, but it works and sets colors differently, so it is still used.
+longitudinal_plot <- function(modobj,plabels = NULL){
+  df <- modobj$gam$model
+  thisResp <- as.character(modobj$gam$terms[[2]])
+
+  pred.male <- data.frame(age = seq(min(df$age,na.rm = T),max(df$age,na.rm = T), length.out = 1000), oSex = 'male',visit = "1",sequence = "B0map_onesizefitsall_v3",oRace_bwo = "1")
+  p<-data.frame(predict(modobj$gam,pred.male,se.fit = T))
+  pred.male$fit = p$fit
+  pred.male$selo = p$fit - 2*p$se.fit
+  pred.male$sehi = p$fit + 2*p$se.fit
+  pred.male[,thisResp] = 1
+  pred.male$bblid=1
+  
+  pred.female <- data.frame(age = seq(min(df$age,na.rm = T),max(df$age,na.rm = T), length.out = 1000), oSex ='female', visit="1",sequence = "B0map_onesizefitsall_v3",oRace_bwo = "1")
+  p<-data.frame(predict(modobj$gam,pred.female,se.fit = T))
+  pred.female$fit = p$fit
+  pred.female$selo = p$fit - 2*p$se.fit
+  pred.female$sehi = p$fit + 2*p$se.fit
+  pred.female[,thisResp] = 1
+  pred.female$bblid=1
+
+
+  # geom_point(alpha = .25) +
+  p1 <- ggplot(data = df,aes_string(x = "age", y = thisResp, group = "bblid",color = "oSex")) +
+    geom_line(alpha = .25) + geom_point(alpha = .25) +
+    scale_color_manual(values = c("blue","red")) +
+    geom_ribbon(data = pred.male, aes(ymin=selo, ymax=sehi), fill = "blue", alpha = .3, linetype = 0,show.legend = F) +
+    geom_line(data = pred.male,aes(x = age, y = fit), color = "blue",size = 1) +
+    geom_ribbon(data = pred.female, aes(ymin=selo, ymax=sehi), fill = "red", alpha = .3, linetype = 0,show.legend = F) +
+    geom_line(data = pred.female,aes(x = age, y = fit), color = "red",size = 1) +
+    labs(title = plabels, y = "R2*", x = "Age (years)", col = "Sex")  + ylim(min(pred.female$selo-.5),NA)
+  if (str_detect(plabels,"Accumbens")) {
+    p1 <- p1 + ylim(10,30)
+  } else if (str_detect(plabels,"Pallidum")) {
+    p1 <- p1 + ylim(15,32)
+  } else if (any(str_detect(plabels,c("Putamen","Caudate")))) {
+    p1 <- p1 + ylim(11,25)
+  }
+  
+  print(p1)
+}
+```
+
+```{r load data, warning=FALSE, include=FALSE}
+# Load the datafile
+dataFile <- "/data/jux/BBL/projects/brain_iron/scripts/PublicationScripts/brain_iron_data_TEMPLATE.Rda"
+if (file.exists(dataFile)) {
+  dataTable <- readRDS(file=dataFile)
+}  else {
+  source('compileData.R')
+  compileData()
+  dataTable <- readRDS(file=dataFile)
+}
+
+## Filter
+### Remove
+### 1. Projects with incompatible data (reward)
+### 2. Sequences with odd parameters
+### 3. Scans that don't pass QA
+### 4. A couple scans and timepoints that hae very few observations (for better model fitting)
+dataTable <- dataTable %>%
+  filter(bblid != 110689)%>%
+  filter(!(ProjectName %in% c("DAY2_808799",
+                              "FNDM1_810211",
+                              "FNDM2_810211",
+                              "NEFF_V2",
+                              "NEFF_PILOT",
+                              "GRMPY_822831",
+                              "GRMPY_V2",
+                              "GRMPY_V3")
+           )
+         ) %>% #Not using data from these projects.
+  filter(sequence != 'B0map_v4_matchedFOV') %>% # Different voxel size
+  filter(sequence != 'B0map_onesizefitsall_v3_T2S') %>% # small number of scans with odd params
+  filter(GOOD %in% c("1","2")) %>%
+  filter(!timepoint %in% c("4")) %>% # Only 5 visits at timepoint 4, may cause issues for modeling
+  filter(sequence != 'b0map_v4') %>% #Very few scans, potentially issue for model fitting
+  filter(age<35) # not necessary, all are already under 35
+
+longTable <- dataTable %>%
+    gather(key = "ROI",value="R2s",Accumbens_Area,Putamen,Caudate,Pallidum)
+
+rois <- c("Caudate","Putamen","Accumbens_Area")
+```
+
+---
+
+## Cognitive Variables
+Run the models:
+```{r Cognitive, results="asis",warning=F, eval = T}
+cog_vars <- c("NAR_Overall_Accuracy","NAR_Overall_Efficiency","NAR_F1_Social_Cognition_Efficiency","mpraxis_mp2rtcr")
+
+for (brain_var in c("Accumbens_Area","Putamen","Caudate","Pallidum")) {
+  cat(brain_var)
+  thisTab <- dataTable %>% filter(scan2cnbmonths<6) 
+  g<-gamm(as.formula(sprintf("%s ~ sex + sequence + timepoint + s(age, k=4)",brain_var)),
+           data=thisTab,
+           random = list(bblid =~ 1))
+  varname <- sprintf("%s_AR",brain_var)
+  modtab <- g$gam$model %>% select(bblid,age)
+  modtab[,varname] <- residuals.gam(g$gam,type = "pearson")
+  thisTab <- left_join(thisTab,modtab,by = c("bblid","age"))
+  
+  for (beh_var in cog_vars) {
+    cat(beh_var)
+    
+    g<-gamm(as.formula(sprintf("%s ~ sex + sequence + timepoint+ s(age, k=4)",beh_var)),
+             data=thisTab,
+             random = list(bblid =~ 1))
+    beh_varname <- sprintf("%s_AR",beh_var)
+    modtab <- g$gam$model %>% select(bblid,age)
+    modtab[,beh_varname] <- residuals.gam(g$gam,type = "pearson")
+    thisTab <- left_join(thisTab,modtab,by = c("bblid","age"))
+  
+    ar_gamm <- gamm(as.formula(sprintf("%s ~ s(%s,k=4)",varname,beh_varname)),
+             data=thisTab,
+             random = list(bblid =~ 1))
+    cat(sprintf("\n\n### Results for %s",beh_var, brain_var))
+    s_tidytable<- tidy(ar_gamm$gam)%>%
+      kable(caption = sprintf("Regression table from gamm %s ~ %s",brain_var, beh_var)) %>% 
+      kable_styling(full_width = F, position = "left")
+    print(s_tidytable)
+    b <- getViz(ar_gamm$gam)
+    var_plot <- plot(b,allTerms = T) + 
+      l_ciPoly() +
+      l_fitRaster() + l_fitContour() + 
+      l_points() +  l_ciBar() +
+      l_fitPoints(size = 1, col = 2) + l_fitLine() 
+    print(var_plot,pages = 1)
+    
+    ar2_gamm <- gamm(as.formula(sprintf("%s ~ s(%s,k=4) + s(%s, by = age ,k=4)",varname,beh_varname,beh_varname)),
+             data=thisTab,
+             random = list(bblid =~ 1))
+    cat(sprintf("\n\n### Results2 for %s %s",beh_var, brain_var))
+    s_tidytable<- tidy(ar_gamm$gam)%>%
+      kable(caption = sprintf("Regression table from gamm %s ~ %s by age",brain_var, beh_var)) %>% 
+      kable_styling(full_width = F, position = "left")
+    print(s_tidytable)
+    b <- getViz(ar_gamm$gam)
+    var_plot <- plot(b,allTerms = T) + 
+      l_ciPoly() +
+      l_fitRaster() + l_fitContour() + 
+      l_points() +  l_ciBar() +
+      l_fitPoints(size = 1, col = 2) + l_fitLine() 
+    print(var_plot,pages = 1)
+  }
+}
+
+```
+
